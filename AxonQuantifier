@@ -1,0 +1,130 @@
+// Set empty directory to output results
+outDir = getString("Path to output directory", "");
+dirFiles = getFileList(outDir);
+if (dirFiles.length != 0)
+    exit("Output directory must be empty");
+
+// Clears log and resets ROI manager
+print("\\Clear");
+if (isOpen("ROI Manager")) {
+    selectWindow("ROI Manager");
+}
+
+// Set intensity threshold from user input
+threshold = getNumber("Set threshold", 0);
+print("Threshold: " + threshold + '\n');
+
+// Set lines from user input to ROI manager
+// The same lines will be used for each slice of the z-stack
+// The first line will be treated as the pre-crush line
+run("ROI Manager...");
+waitForUser("Add lines to ROI manager");
+nROIs = roiManager("Count");
+for (i = 0; i < nROIs; i++) {
+    roiManager("select", i);
+    roiManager("remove slice info");
+}
+
+// Must have at least one line in the ROI manager
+if (nROIs == 0)
+    exit("No lines were added");
+
+// Save selected ROI lines to output directory
+File.makeDirectory(outDir + File.separator + "rois");
+roiLabels = newArray(nROIs);
+roiManager("select", 0);
+roiManager("save selected", outDir + File.separator + "rois" + File.separator + "Pre.roi");
+roiLabels[0] = "Pre-crush";
+for (i = 1; i < nROIs; i++) {
+    roiManager("select", i);
+    roiManager("save selected", outDir + File.separator + "rois" + File.separator + "Post" + i + ".roi");
+    roiLabels[i] = call("ij.plugin.frame.RoiManager.getName", i);
+}
+
+// Calculates length of each line
+len = newArray(nROIs);
+getPixelSize(unit, width, height);
+print("Widths in " + unit + ":");
+for (i = 0; i < nROIs; i++) {
+    roiManager("select", i);
+    getLine(x1, y1, x2, y2, lineWidth);
+    len[i] = sqrt((x2 - x1) * (x2 - x1) * width * width + (y2-y1) * (y2-y1) * height * height); // Euclidean distance
+    if (i == 0) {
+        print("Pre-crush: " + len[i]);
+        print("Post-crush:");
+    } else
+        print(" " + roiLabels[i] + ": " + len[i]);
+}
+print("");
+
+// For each line, calculates sum of pixel intensity divided by pre-crush norm
+// For each line, also calculates total of sums across all slices
+// Saves individual sums to output directory
+sum = newArray((nROIs)*nSlices);
+total = newArray(nROIs);
+for (z = 1; z <= nSlices; z++) {
+    print(z);
+    Stack.setSlice(z);
+
+    File.makeDirectory(outDir + File.separator + z);
+    for (i = 0; i < nROIs; i++) {
+        roiManager("select", i);
+        run("Clear Results");
+        profile = getProfile(); // Array of intensity values from Analyze > Plot Profile
+        k = nROIs * (z - 1) + i;
+        for (j = 0; j < profile.length; j++) {
+            if (profile[j] >= threshold) { // Ignores intensity values less than threshold
+                setResult("Value", j, profile[j]);
+                sum[k] += profile[j];
+            } else
+                setResult("Value", j, 0);
+        }
+        updateResults();
+        total[i] += sum[k];
+        if (i == 0) {
+            print("Pre-crush: " + sum[k]);
+            saveAs("Measurements", outDir + File.separator + z + File.separator + "Pre.csv");
+            print("Post-crush:");
+        } else {
+            print(" " + roiLabels[i] + ": " + sum[k]);
+            saveAs("Measurements", outDir + File.separator + z + File.separator + "Post" + i + ".csv");
+        }
+    }
+    print("");
+}
+
+// Calculates average sum across all slices
+print("Averages:");
+print("Pre-crush: " + total[0] / nSlices);
+print("Post-crush:");
+for (i = 1; i < nROIs; i++)
+    print(" " + roiLabels[i] + ": " + total[i] / nSlices);
+
+// Saves log to output directory
+selectWindow("Log");
+saveAs("text", outDir + File.separator + "results.txt");
+
+// Creates summary of results and saves to output directory
+run("Clear Results");
+for (z = 1; z <= nSlices; z++) {
+    setResult("", z - 1, z);
+    for (i = 0; i < nROIs; i++)
+        setResult(roiLabels[i], z - 1, sum[nROIs * (z - 1) + i]);
+}
+setResult("", nSlices, "Average Intensity");
+for (i = 0; i < nROIs; i++)
+    setResult(roiLabels[i], nSlices, total[i] / nSlices);
+setResult("", nSlices + 1, "ROI Length (Nerve Diameter)");
+for (i = 0; i < nROIs; i++)
+    setResult(roiLabels[i], nSlices + 1, len[i]);
+setResult("", nSlices + 2, "Average Intensity / Nerve Diameter");
+for (i = 0; i < nROIs; i++)
+    setResult(roiLabels[i], nSlices + 2, (total[i] / nSlices) / len[i]);
+setResult("", nSlices + 3, "% Recovered Axons");
+pcAvg = (total[0] / nSlices) / len[0];
+for (i = 1; i < nROIs; i++)
+    setResult(roiLabels[i], nSlices + 3, ((total[i] / nSlices) / len[i]) / pcAvg);
+updateResults();
+run("Input/Output...", "file=.csv copy_row save_column"); // Overrides row numbers
+saveAs("Measurements", outDir + File.separator + "summary.csv");
+run("Input/Output...", "file=.csv copy_row save_column save_row"); // Resets to default options
